@@ -280,34 +280,57 @@ async def attach_tmdb_card_by_title(title: str) -> Optional[TMDBMovieCard]:
 # =========================
 # STARTUP: LOAD PICKLES
 # =========================
+# @app.on_event("startup")
+# def load_pickles():
+#     global df, indices_obj, tfidf_matrix, tfidf_obj, TITLE_TO_IDX
+
+#     # Load df
+#     with open(DF_PATH, "rb") as f:
+#         df = pickle.load(f)
+
+#     # Load indices
+#     with open(INDICES_PATH, "rb") as f:
+#         indices_obj = pickle.load(f)
+
+#     # Load TF-IDF matrix (usually scipy sparse)
+#     with open(TFIDF_MATRIX_PATH, "rb") as f:
+#         tfidf_matrix = pickle.load(f)
+
+#     # Load tfidf vectorizer (optional, not used directly here)
+#     with open(TFIDF_PATH, "rb") as f:
+#         tfidf_obj = pickle.load(f)
+
+#     # Build normalized map
+#     TITLE_TO_IDX = build_title_to_idx_map(indices_obj)
+
+#     # sanity
+#     if df is None or "title" not in df.columns:
+#         raise RuntimeError("df.pkl must contain a DataFrame with a 'title' column")
 @app.on_event("startup")
 def load_pickles():
     global df, indices_obj, tfidf_matrix, tfidf_obj, TITLE_TO_IDX
 
-    # Load df
-    with open(DF_PATH, "rb") as f:
-        df = pickle.load(f)
+    import pandas as pd
+    from sklearn.feature_extraction.text import TfidfVectorizer
 
-    # Load indices
-    with open(INDICES_PATH, "rb") as f:
-        indices_obj = pickle.load(f)
+    csv_path = os.path.join(BASE_DIR, "movies_metadata.csv")
 
-    # Load TF-IDF matrix (usually scipy sparse)
-    with open(TFIDF_MATRIX_PATH, "rb") as f:
-        tfidf_matrix = pickle.load(f)
+    df = pd.read_csv(csv_path)
 
-    # Load tfidf vectorizer (optional, not used directly here)
-    with open(TFIDF_PATH, "rb") as f:
-        tfidf_obj = pickle.load(f)
+    # keep required columns
+    df = df[["title", "overview"]].dropna()
 
-    # Build normalized map
+    # TF-IDF
+    tfidf_obj = TfidfVectorizer(stop_words="english")
+
+    tfidf_matrix = tfidf_obj.fit_transform(df["overview"])
+
+    # indices
+    indices_obj = pd.Series(df.index, index=df["title"]).drop_duplicates()
+
     TITLE_TO_IDX = build_title_to_idx_map(indices_obj)
 
-    # sanity
-    if df is None or "title" not in df.columns:
-        raise RuntimeError("df.pkl must contain a DataFrame with a 'title' column")
-
-
+    print("TF-IDF resources generated successfully.")
 # =========================
 # ROUTES
 # =========================
