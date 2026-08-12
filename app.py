@@ -1,11 +1,27 @@
+import os
 import requests
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
 import streamlit as st
 
 # =============================
 # CONFIG
 # =============================
-API_BASE = "https://movie-recommendation-system-6puz.onrender.com" or "http://127.0.0.1:8000"
+API_BASE = "https://movie-recommendation-system-6puz.onrender.com"
+TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
+DEFAULT_TMDB_KEY = "c93c1394ade63533cd412d87433eda9"
+
+
+def get_tmdb_key():
+    try:
+        if "TMDB_API_KEY" in st.secrets:
+            return st.secrets["TMDB_API_KEY"]
+    except Exception:
+        pass
+    return os.getenv("TMDB_API_KEY") or DEFAULT_TMDB_KEY
+
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
 
@@ -25,10 +41,217 @@ st.markdown(
 )
 
 # =============================
-# STATE + ROUTING (single-file pages)
+# DIRECT ENGINE FALLBACK (Self-contained)
+# =============================
+@st.cache_resource
+def load_local_engine():
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(BASE_DIR, "movies_metadata.csv")
+    df = pd.read_csv(csv_path, low_memory=False)
+    
+    df_clean = df[["id", "title", "overview", "poster_path", "release_date", "vote_average"]].dropna(subset=["title", "overview"]).copy()
+    df_clean["title_str"] = df_clean["title"].astype(str)
+    
+    tfidf_obj = TfidfVectorizer(stop_words="english")
+    tfidf_matrix = tfidf_obj.fit_transform(df_clean["overview"])
+    
+    indices = pd.Series(df_clean.index, index=df_clean["title_str"]).drop_duplicates()
+    title_to_idx = {str(k).strip().lower(): int(v) for k, v in indices.items()}
+    
+    return df_clean, tfidf_matrix, title_to_idx
+
+
+def tmdb_direct_get(endpoint: str, params: dict | None = None):
+    p = dict(params or {})
+    p["api_key"] = get_tmdb_key()
+    try:
+        r = requests.get(f"{TMDB_BASE}{endpoint}", params=p, timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def direct_home(category: str = "popular", limit: int = 24):
+    endpoint = "/trending/movie/day" if category == "trending" else f"/movie/{category}"
+    data = tmdb_direct_get(endpoint, {"language": "en-US", "page": 1})
+    if data and "results" in data:
+        cards = []
+        for m in data["results"][:limit]:
+            cards.append({
+                "tmdb_id": int(m["id"]),
+                "title": m.get("title") or m.get("name") or "Untitled",
+                "poster_url": f"{TMDB_IMG}{m.get('poster_path')}" if m.get("poster_path") else None,
+                "release_date": m.get("release_date"),
+                "vote_average": m.get("vote_average"),
+            })
+        return cards
+    
+    # Offline CSV fallback
+    df_clean, _, _ = load_local_engine()
+    sample = df_clean.sample(min(limit, len(df_clean)))
+    cards = []
+    for _, row in sample.iterrows():
+        try:
+            tmdb_id = int(row["id"])
+        except Exception:
+            tmdb_id = 0
+        cards.append({
+            "tmdb_id": tmdb_id,
+            "title": str(row["title"]),
+            "poster_url": f"{TMDB_IMG}{row['poster_path']}" if pd.notna(row["poster_path"]) else None,
+            "release_date": str(row["release_date"]),
+            "vote_average": float(row["vote_average"]) if pd.notna(row["vote_average"]) else None,
+        })
+    return cards
+
+
+def direct_tmdb_search(query: str, page: int = 1):
+    data = tmdb_direct_get("/search/movie", {"query": query, "include_adult": "false", "language": "en-US", "page": page})
+    if data and "results" in data:
+        return data
+    
+    df_clean, _, _ = load_local_engine()
+    matched = df_clean[df_clean["title_str"].str.contains(query, case=False, na=False)].head(20)
+    results = []
+    for _, row in matched.iterrows():
+        try:
+            t_id = int(row["id"])
+        except Exception:
+            t_id = 0
+        results.append({
+            "id": t_id,
+            "title": str(row["title"]),
+            "poster_path": str(row["poster_path"]) if pd.notna(row["poster_path"]) else None,
+            "release_date": str(row["release_date"]),
+            "overview": str(row["overview"]),
+        })
+    return {"results": results}
+
+
+def direct_movie_details(tmdb_id: int):
+    data = tmdb_direct_get(f"/movie/{tmdb_id}", {"language": "en-US"})
+    if data:
+        return {
+            "tmdb_id": int(data["id"]),
+            "title": data.get("title") or "",
+            "overview": data.get("overview"),
+            "release_date": data.get("release_date"),
+            "poster_url": f"{TMDB_IMG}{data.get('poster_path')}" if data.get("poster_path") else None,
+            "backdrop_url": f"{TMDB_IMG}{data.get('backdrop_path')}" if data.get("backdrop_path") else None,
+            "genres": data.get("genres", []) or [],
+        }
+    
+    df_clean, _, _ = load_local_engine()
+    row = df_clean[df_clean["id"] == str(tmdb_id)]
+    if not row.empty:
+        r = row.iloc[0]
+        return {
+            "tmdb_id": tmdb_id,
+            "title": str(r["title"]),
+            "overview": str(r["overview"]),
+            "release_date": str(r["release_date"]),
+            "poster_url": f"{TMDB_IMG}{r['poster_path']}" if pd.notna(r["poster_path"]) else None,
+            "backdrop_url": None,
+            "genres": [],
+        }
+    return {"tmdb_id": tmdb_id, "title": "Movie Details", "overview": "No overview available.", "genres": []}
+
+
+def direct_tfidf_recommend(title: str, top_n: int = 12):
+    df_clean, matrix, title_to_idx = load_local_engine()
+    key = str(title).strip().lower()
+    idx = title_to_idx.get(key)
+    
+    if idx is None:
+        matches = [k for k in title_to_idx.keys() if key in k]
+        if matches:
+            idx = title_to_idx[matches[0]]
+            
+    if idx is None:
+        return []
+        
+    qv = matrix[idx]
+    scores = (matrix @ qv.T).toarray().ravel()
+    order = np.argsort(-scores)
+    
+    recs = []
+    for i in order:
+        if int(i) == int(idx):
+            continue
+        row = df_clean.iloc[int(i)]
+        t = str(row["title"])
+        s = float(scores[int(i)])
+        p_path = row["poster_path"] if pd.notna(row["poster_path"]) else None
+        
+        try:
+            t_id = int(row["id"])
+        except Exception:
+            t_id = 0
+            
+        recs.append({
+            "title": t,
+            "score": s,
+            "tmdb": {
+                "tmdb_id": t_id,
+                "title": t,
+                "poster_url": f"{TMDB_IMG}{p_path}" if p_path else None
+            }
+        })
+        if len(recs) >= top_n:
+            break
+    return recs
+
+
+def direct_genre_recommend(tmdb_id: int, limit: int = 12):
+    details = direct_movie_details(tmdb_id)
+    genres = details.get("genres", [])
+    if genres:
+        g_id = genres[0]["id"]
+        discover = tmdb_direct_get("/discover/movie", {
+            "with_genres": g_id,
+            "language": "en-US",
+            "sort_by": "popularity.desc",
+            "page": 1
+        })
+        if discover and "results" in discover:
+            cards = []
+            for m in discover["results"][:limit]:
+                if int(m["id"]) != tmdb_id:
+                    cards.append({
+                        "tmdb_id": int(m["id"]),
+                        "title": m.get("title") or "",
+                        "poster_url": f"{TMDB_IMG}{m.get('poster_path')}" if m.get("poster_path") else None
+                    })
+            return cards
+    return []
+
+
+def direct_search_bundle(query: str, tfidf_top_n: int = 12, genre_limit: int = 12):
+    search_res = direct_tmdb_search(query)
+    results = search_res.get("results", [])
+    if not results:
+        return None
+    best = results[0]
+    tmdb_id = int(best["id"])
+    details = direct_movie_details(tmdb_id)
+    
+    tfidf_items = direct_tfidf_recommend(details["title"], top_n=tfidf_top_n)
+    genre_items = direct_genre_recommend(tmdb_id, limit=genre_limit)
+    
+    return {
+        "query": query,
+        "movie_details": details,
+        "tfidf_recommendations": tfidf_items,
+        "genre_recommendations": genre_items
+    }
+
+# =============================
+# STATE + ROUTING
 # =============================
 if "view" not in st.session_state:
-    st.session_state.view = "home"  # home | details
+    st.session_state.view = "home"
 if "selected_tmdb_id" not in st.session_state:
     st.session_state.selected_tmdb_id = None
 
@@ -40,7 +263,7 @@ if qp_id:
     try:
         st.session_state.selected_tmdb_id = int(qp_id)
         st.session_state.view = "details"
-    except:
+    except Exception:
         pass
 
 
@@ -61,17 +284,48 @@ def goto_details(tmdb_id: int):
 
 
 # =============================
-# API HELPERS
+# API HELPERS (With Seamless Direct Fallback)
 # =============================
-@st.cache_data(ttl=30)  # short cache for autocomplete
+@st.cache_data(ttl=30)
 def api_get_json(path: str, params: dict | None = None):
+    if API_BASE:
+        try:
+            r = requests.get(f"{API_BASE}{path}", params=params, timeout=4)
+            if r.status_code == 200 and "application/json" in r.headers.get("content-type", ""):
+                return r.json(), None
+        except Exception:
+            pass
+
+    # Direct Execution Fallback
+    params = params or {}
     try:
-        r = requests.get(f"{API_BASE}{path}", params=params, timeout=25)
-        if r.status_code >= 400:
-            return None, f"HTTP {r.status_code}: {r.text[:300]}"
-        return r.json(), None
+        if path == "/home":
+            cat = params.get("category", "popular")
+            lim = int(params.get("limit", 24))
+            return direct_home(cat, lim), None
+        elif path == "/tmdb/search":
+            q = params.get("query", "")
+            p = int(params.get("page", 1))
+            return direct_tmdb_search(q, p), None
+        elif path.startswith("/movie/id/"):
+            tmdb_id = int(path.split("/")[-1])
+            return direct_movie_details(tmdb_id), None
+        elif path == "/movie/search":
+            q = params.get("query", "")
+            t_n = int(params.get("tfidf_top_n", 12))
+            g_l = int(params.get("genre_limit", 12))
+            res = direct_search_bundle(q, t_n, g_l)
+            if res:
+                return res, None
+            return None, "No movie found"
+        elif path == "/recommend/genre":
+            t_id = int(params.get("tmdb_id", 0))
+            lim = int(params.get("limit", 12))
+            return direct_genre_recommend(t_id, lim), None
     except Exception as e:
-        return None, f"Request failed: {e}"
+        return None, f"Direct engine error: {e}"
+
+    return None, "Endpoint not found"
 
 
 def poster_grid(cards, cols=6, key_prefix="grid"):
@@ -124,10 +378,6 @@ def to_cards_from_tfidf_items(tfidf_items):
 
 
 def search_sequels(base_title: str, limit: int = 6) -> list:
-    """
-    Search for sequels by trying common patterns:
-    - "{title} 2", "{title} II", "{title} Part 2", etc.
-    """
     sequels = []
     patterns = [
         f"{base_title} 2",
@@ -135,7 +385,7 @@ def search_sequels(base_title: str, limit: int = 6) -> list:
         f"{base_title} Part 2",
         f"{base_title}: Part 2",
     ]
-    
+
     for pattern in patterns:
         data, err = api_get_json("/tmdb/search", params={"query": pattern.strip(), "page": 1})
         if not err and data and "results" in data:
@@ -146,35 +396,22 @@ def search_sequels(base_title: str, limit: int = 6) -> list:
                         "title": result.get("title", ""),
                         "poster_url": f"{TMDB_IMG}{result.get('poster_path')}" if result.get("poster_path") else None,
                     })
-        if sequels:  # Stop if we found any matches
+        if sequels:
             break
-    
-    # Remove duplicates and limit
+
     seen = set()
     unique_sequels = []
     for s in sequels:
         if s["tmdb_id"] not in seen:
             seen.add(s["tmdb_id"])
             unique_sequels.append(s)
-    
+
     return unique_sequels[:limit]
 
 
-# =============================
-# IMPORTANT: Robust TMDB search parsing
-# Supports BOTH API shapes:
-# 1) raw TMDB: {"results":[{id,title,poster_path,...}]}
-# 2) list cards: [{tmdb_id,title,poster_url,...}]
-# =============================
 def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
-    """
-    Returns:
-      suggestions: list[(label, tmdb_id)]
-      cards: list[{tmdb_id,title,poster_url}]
-    """
     keyword_l = keyword.strip().lower()
 
-    # A) If API returns dict with 'results'
     if isinstance(data, dict) and "results" in data:
         raw = data.get("results") or []
         raw_items = []
@@ -188,16 +425,14 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
                 {
                     "tmdb_id": int(tmdb_id),
                     "title": title,
-                    "poster_url": f"{TMDB_IMG}{poster_path}" if poster_path else None,
+                    "poster_url": f"{TMDB_IMG}{poster_path}" if poster_path and not str(poster_path).startswith("http") else poster_path,
                     "release_date": m.get("release_date", ""),
                 }
             )
 
-    # B) If API returns already as list
     elif isinstance(data, list):
         raw_items = []
         for m in data:
-            # might be {tmdb_id,title,poster_url}
             tmdb_id = m.get("tmdb_id") or m.get("id")
             title = (m.get("title") or "").strip()
             poster_url = m.get("poster_url")
@@ -214,20 +449,15 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
     else:
         return [], []
 
-    # Word-match filtering (contains)
     matched = [x for x in raw_items if keyword_l in x["title"].lower()]
-
-    # If nothing matched, fallback to raw list (so never blank)
     final_list = matched if matched else raw_items
 
-    # Suggestions = top 10 labels
     suggestions = []
     for x in final_list[:10]:
         year = (x.get("release_date") or "")[:4]
         label = f"{x['title']} ({year})" if year else x["title"]
         suggestions.append((label, x["tmdb_id"]))
 
-    # Cards = top N
     cards = [
         {"tmdb_id": x["tmdb_id"], "title": x["title"], "poster_url": x["poster_url"]}
         for x in final_list[:limit]
@@ -236,7 +466,7 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
 
 
 # =============================
-# SIDEBAR (clean)
+# SIDEBAR
 # =============================
 with st.sidebar:
     st.markdown("## 🎬 Menu")
@@ -272,7 +502,6 @@ if st.session_state.view == "home":
 
     st.divider()
 
-    # SEARCH MODE (Autocomplete + word-match results)
     if typed.strip():
         if len(typed.strip()) < 2:
             st.caption("Type at least 2 characters for suggestions.")
@@ -286,13 +515,11 @@ if st.session_state.view == "home":
                     data, typed.strip(), limit=24
                 )
 
-                # Dropdown
                 if suggestions:
                     labels = ["-- Select a movie --"] + [s[0] for s in suggestions]
                     selected = st.selectbox("Suggestions", labels, index=0)
 
                     if selected != "-- Select a movie --":
-                        # map label -> id
                         label_to_id = {s[0]: s[1] for s in suggestions}
                         goto_details(label_to_id[selected])
                 else:
@@ -303,7 +530,6 @@ if st.session_state.view == "home":
 
         st.stop()
 
-    # HOME FEED MODE
     st.markdown(f"### 🏠 Home — {home_category.replace('_',' ').title()}")
 
     home_cards, err = api_get_json(
@@ -326,7 +552,6 @@ elif st.session_state.view == "details":
             goto_home()
         st.stop()
 
-    # Top bar
     a, b = st.columns([3, 1])
     with a:
         st.markdown("### 📄 Movie Details")
@@ -334,13 +559,11 @@ elif st.session_state.view == "details":
         if st.button("← Back to Home"):
             goto_home()
 
-    # Details (your FastAPI safe route)
     data, err = api_get_json(f"/movie/id/{tmdb_id}")
     if err or not data:
         st.error(f"Could not load details: {err or 'Unknown error'}")
         st.stop()
 
-    # Layout: Poster LEFT, Details RIGHT
     left, right = st.columns([1, 2.4], gap="large")
 
     with left:
@@ -374,19 +597,17 @@ elif st.session_state.view == "details":
     st.divider()
     st.markdown("### ✅ Recommendations")
 
-    # Recommendations (TF-IDF + Genre) via your bundle endpoint
     title = (data.get("title") or "").strip()
     if title:
-        # Check for Sequels first
         st.markdown("#### 🎬 Sequels & Franchises")
         sequels = search_sequels(title, limit=6)
         if sequels:
             poster_grid(sequels, cols=grid_cols, key_prefix="sequels")
         else:
             st.caption("No sequels found for this movie.")
-        
+
         st.divider()
-        
+
         bundle, err2 = api_get_json(
             "/movie/search",
             params={"query": title, "tfidf_top_n": 12, "genre_limit": 12},
