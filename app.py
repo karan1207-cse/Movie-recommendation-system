@@ -1,5 +1,6 @@
 import os
 import requests
+import urllib.parse
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -21,6 +22,60 @@ def get_tmdb_key():
     except Exception:
         pass
     return os.getenv("TMDB_API_KEY") or DEFAULT_TMDB_KEY
+
+
+def get_placeholder_poster(title: str) -> str:
+    safe_title = str(title or "Movie").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    display_title = safe_title[:28]
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="750" viewBox="0 0 500 750">'
+        '<rect width="500" height="750" fill="#0f172a"/>'
+        '<rect x="20" y="20" width="460" height="710" rx="16" fill="#1e293b" stroke="#334155" stroke-width="4"/>'
+        '<text x="250" y="320" font-family="system-ui, sans-serif" font-size="80" text-anchor="middle" fill="#38bdf8">🎬</text>'
+        f'<text x="250" y="420" font-family="system-ui, sans-serif" font-size="24" font-weight="bold" text-anchor="middle" fill="#f8fafc">{display_title}</text>'
+        '<text x="250" y="460" font-family="system-ui, sans-serif" font-size="16" text-anchor="middle" fill="#94a3b8">No Poster Available</text>'
+        '</svg>'
+    )
+    return f"data:image/svg+xml;utf8,{urllib.parse.quote(svg)}"
+
+
+def get_poster_url(poster_path: str | None, title: str = "Movie", tmdb_id: int | None = None) -> str:
+    if tmdb_id and isinstance(tmdb_id, (int, float, str)):
+        try:
+            tid = int(tmdb_id)
+            if tid > 0:
+                live_p = fetch_live_poster_path(tid)
+                if live_p:
+                    if live_p.startswith("/"):
+                        return f"https://image.tmdb.org/t/p/w500{live_p}"
+                    return f"https://image.tmdb.org/t/p/w500/{live_p}"
+        except Exception:
+            pass
+
+    if not poster_path:
+        return get_placeholder_poster(title)
+
+    s = str(poster_path).strip()
+    if s.lower() in ("none", "nan", "null", ""):
+        return get_placeholder_poster(title)
+    if s.startswith("data:image"):
+        return s
+    if s.startswith("http://") or s.startswith("https://"):
+        if s.endswith("None") or s.endswith("nan") or s.endswith("null"):
+            return get_placeholder_poster(title)
+        return s
+    if s.startswith("/"):
+        return f"https://image.tmdb.org/t/p/w500{s}"
+    return f"https://image.tmdb.org/t/p/w500/{s}"
+
+
+def render_poster_image(poster_url: str, title: str = "Movie"):
+    if not poster_url or poster_url.startswith("data:image"):
+        st.image(poster_url or get_placeholder_poster(title), use_column_width=True)
+    else:
+        placeholder = get_placeholder_poster(title)
+        html = f'<img src="{poster_url}" onerror="this.onerror=null;this.src=\'{placeholder}\';" style="width:100%; border-radius:12px; object-fit:cover; aspect-ratio:2/3;" />'
+        st.markdown(html, unsafe_allow_html=True)
 
 
 st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
@@ -76,16 +131,30 @@ def tmdb_direct_get(endpoint: str, params: dict | None = None):
     return None
 
 
+@st.cache_data(ttl=86400)
+def fetch_live_poster_path(tmdb_id: int) -> str | None:
+    if not tmdb_id or tmdb_id <= 0:
+        return None
+    data = tmdb_direct_get(f"/movie/{tmdb_id}")
+    if data and isinstance(data, dict):
+        p = data.get("poster_path")
+        if p and str(p).strip().lower() not in ("none", "nan", "null", ""):
+            return str(p).strip()
+    return None
+
+
 def direct_home(category: str = "popular", limit: int = 24):
     endpoint = "/trending/movie/day" if category == "trending" else f"/movie/{category}"
     data = tmdb_direct_get(endpoint, {"language": "en-US", "page": 1})
     if data and "results" in data:
         cards = []
         for m in data["results"][:limit]:
+            title = m.get("title") or m.get("name") or "Untitled"
+            m_id = int(m["id"])
             cards.append({
-                "tmdb_id": int(m["id"]),
-                "title": m.get("title") or m.get("name") or "Untitled",
-                "poster_url": f"{TMDB_IMG}{m.get('poster_path')}" if m.get("poster_path") else None,
+                "tmdb_id": m_id,
+                "title": title,
+                "poster_url": get_poster_url(m.get("poster_path"), title, tmdb_id=m_id),
                 "release_date": m.get("release_date"),
                 "vote_average": m.get("vote_average"),
             })
@@ -101,11 +170,12 @@ def direct_home(category: str = "popular", limit: int = 24):
             tmdb_id = int(row["id"])
         except Exception:
             tmdb_id = 0
+        title = str(row["title"])
         p_path = str(row["poster_path"]).strip() if pd.notna(row["poster_path"]) else ""
         cards.append({
             "tmdb_id": tmdb_id,
-            "title": str(row["title"]),
-            "poster_url": f"{TMDB_IMG}{p_path}" if p_path and p_path.startswith("/") else None,
+            "title": title,
+            "poster_url": get_poster_url(p_path, title, tmdb_id=tmdb_id),
             "release_date": str(row["release_date"]) if pd.notna(row["release_date"]) else "",
             "vote_average": float(row["vote_average"]) if pd.notna(row["vote_average"]) else None,
         })
@@ -115,7 +185,19 @@ def direct_home(category: str = "popular", limit: int = 24):
 def direct_tmdb_search(query: str, page: int = 1):
     data = tmdb_direct_get("/search/movie", {"query": query, "include_adult": "false", "language": "en-US", "page": page})
     if data and "results" in data:
-        return data
+        results = []
+        for m in data.get("results", []):
+            title = m.get("title") or m.get("name") or "Untitled"
+            m_id = int(m["id"])
+            results.append({
+                "id": m_id,
+                "title": title,
+                "poster_path": m.get("poster_path"),
+                "poster_url": get_poster_url(m.get("poster_path"), title, tmdb_id=m_id),
+                "release_date": m.get("release_date", ""),
+                "overview": m.get("overview", ""),
+            })
+        return {"results": results}
     
     df_clean, _, _ = load_local_engine()
     matched = df_clean[df_clean["title_str"].str.contains(query, case=False, na=False)].head(20)
@@ -125,10 +207,13 @@ def direct_tmdb_search(query: str, page: int = 1):
             t_id = int(row["id"])
         except Exception:
             t_id = 0
+        title = str(row["title"])
+        p_path = str(row["poster_path"]).strip() if pd.notna(row["poster_path"]) else ""
         results.append({
             "id": t_id,
-            "title": str(row["title"]),
-            "poster_path": str(row["poster_path"]) if pd.notna(row["poster_path"]) else None,
+            "title": title,
+            "poster_path": p_path,
+            "poster_url": get_poster_url(p_path, title, tmdb_id=t_id),
             "release_date": str(row["release_date"]),
             "overview": str(row["overview"]),
         })
@@ -138,13 +223,15 @@ def direct_tmdb_search(query: str, page: int = 1):
 def direct_movie_details(tmdb_id: int):
     data = tmdb_direct_get(f"/movie/{tmdb_id}", {"language": "en-US"})
     if data:
+        title = data.get("title") or ""
+        m_id = int(data["id"])
         return {
-            "tmdb_id": int(data["id"]),
-            "title": data.get("title") or "",
+            "tmdb_id": m_id,
+            "title": title,
             "overview": data.get("overview"),
             "release_date": data.get("release_date"),
-            "poster_url": f"{TMDB_IMG}{data.get('poster_path')}" if data.get("poster_path") else None,
-            "backdrop_url": f"{TMDB_IMG}{data.get('backdrop_path')}" if data.get("backdrop_path") else None,
+            "poster_url": get_poster_url(data.get("poster_path"), title, tmdb_id=m_id),
+            "backdrop_url": get_poster_url(data.get("backdrop_path"), title) if data.get("backdrop_path") else None,
             "genres": data.get("genres", []) or [],
         }
     
@@ -152,12 +239,14 @@ def direct_movie_details(tmdb_id: int):
     row = df_clean[df_clean["id"] == str(tmdb_id)]
     if not row.empty:
         r = row.iloc[0]
+        title = str(r["title"])
+        p_path = str(r["poster_path"]).strip() if pd.notna(r["poster_path"]) else ""
         return {
             "tmdb_id": tmdb_id,
-            "title": str(r["title"]),
+            "title": title,
             "overview": str(r["overview"]),
             "release_date": str(r["release_date"]),
-            "poster_url": f"{TMDB_IMG}{r['poster_path']}" if pd.notna(r["poster_path"]) else None,
+            "poster_url": get_poster_url(p_path, title, tmdb_id=tmdb_id),
             "backdrop_url": None,
             "genres": [],
         }
@@ -188,7 +277,7 @@ def direct_tfidf_recommend(title: str, top_n: int = 12):
         row = df_clean.iloc[int(i)]
         t = str(row["title"])
         s = float(scores[int(i)])
-        p_path = row["poster_path"] if pd.notna(row["poster_path"]) else None
+        p_path = str(row["poster_path"]).strip() if pd.notna(row["poster_path"]) else ""
         
         try:
             t_id = int(row["id"])
@@ -201,7 +290,7 @@ def direct_tfidf_recommend(title: str, top_n: int = 12):
             "tmdb": {
                 "tmdb_id": t_id,
                 "title": t,
-                "poster_url": f"{TMDB_IMG}{p_path}" if p_path else None
+                "poster_url": get_poster_url(p_path, t, tmdb_id=t_id)
             }
         })
         if len(recs) >= top_n:
@@ -224,10 +313,12 @@ def direct_genre_recommend(tmdb_id: int, limit: int = 12):
             cards = []
             for m in discover["results"][:limit]:
                 if int(m["id"]) != tmdb_id:
+                    m_title = m.get("title") or ""
+                    m_id = int(m["id"])
                     cards.append({
-                        "tmdb_id": int(m["id"]),
-                        "title": m.get("title") or "",
-                        "poster_url": f"{TMDB_IMG}{m.get('poster_path')}" if m.get("poster_path") else None
+                        "tmdb_id": m_id,
+                        "title": m_title,
+                        "poster_url": get_poster_url(m.get("poster_path"), m_title, tmdb_id=m_id)
                     })
             return cards
     return []
@@ -350,28 +441,10 @@ def poster_grid(cards, cols=6, key_prefix="grid"):
 
             tmdb_id = m.get("tmdb_id")
             title = m.get("title", "Untitled")
-            poster = m.get("poster_url")
-            
-            is_valid_poster = (
-                poster 
-                and isinstance(poster, str) 
-                and poster.startswith("http") 
-                and not poster.endswith("None") 
-                and not poster.endswith("nan")
-            )
+            poster = get_poster_url(m.get("poster_url") or m.get("poster_path"), title, tmdb_id=tmdb_id)
 
             with colset[c]:
-                if is_valid_poster:
-                    st.image(poster, use_column_width=True)
-                else:
-                    st.markdown(
-                        f"""
-                        <div style="height:210px; background:#1e293b; border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; padding:12px; color:#f8fafc; font-weight:600; font-size:0.85rem; margin-bottom:8px; border:1px solid #334155;">
-                            🎬<br><br>{title}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                render_poster_image(poster, title)
 
                 if st.button("Open", key=f"{key_prefix}_{r}_{c}_{idx}_{tmdb_id}"):
                     if tmdb_id:
@@ -391,7 +464,7 @@ def to_cards_from_tfidf_items(tfidf_items):
                 {
                     "tmdb_id": tmdb["tmdb_id"],
                     "title": tmdb.get("title") or x.get("title") or "Untitled",
-                    "poster_url": tmdb.get("poster_url"),
+                    "poster_url": get_poster_url(tmdb.get("poster_url") or tmdb.get("poster_path"), tmdb.get("title") or "Untitled", tmdb_id=tmdb.get("tmdb_id")),
                 }
             )
     return cards
@@ -411,10 +484,12 @@ def search_sequels(base_title: str, limit: int = 6) -> list:
         if not err and data and "results" in data:
             for result in data.get("results", []):
                 if result.get("id") and result.get("title"):
+                    s_title = result.get("title", "")
+                    s_id = int(result["id"])
                     sequels.append({
-                        "tmdb_id": int(result["id"]),
-                        "title": result.get("title", ""),
-                        "poster_url": f"{TMDB_IMG}{result.get('poster_path')}" if result.get("poster_path") else None,
+                        "tmdb_id": s_id,
+                        "title": s_title,
+                        "poster_url": get_poster_url(result.get("poster_path"), s_title, tmdb_id=s_id),
                     })
         if sequels:
             break
@@ -438,14 +513,14 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
         for m in raw:
             title = (m.get("title") or "").strip()
             tmdb_id = m.get("id")
-            poster_path = m.get("poster_path")
+            poster_path = m.get("poster_path") or m.get("poster_url")
             if not title or not tmdb_id:
                 continue
             raw_items.append(
                 {
                     "tmdb_id": int(tmdb_id),
                     "title": title,
-                    "poster_url": f"{TMDB_IMG}{poster_path}" if poster_path and not str(poster_path).startswith("http") else poster_path,
+                    "poster_url": get_poster_url(poster_path, title, tmdb_id=int(tmdb_id)),
                     "release_date": m.get("release_date", ""),
                 }
             )
@@ -455,14 +530,14 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
         for m in data:
             tmdb_id = m.get("tmdb_id") or m.get("id")
             title = (m.get("title") or "").strip()
-            poster_url = m.get("poster_url")
+            poster_url = m.get("poster_url") or m.get("poster_path")
             if not title or not tmdb_id:
                 continue
             raw_items.append(
                 {
                     "tmdb_id": int(tmdb_id),
                     "title": title,
-                    "poster_url": poster_url,
+                    "poster_url": get_poster_url(poster_url, title, tmdb_id=int(tmdb_id)),
                     "release_date": m.get("release_date", ""),
                 }
             )
@@ -479,7 +554,7 @@ def parse_tmdb_search_to_cards(data, keyword: str, limit: int = 24):
         suggestions.append((label, x["tmdb_id"]))
 
     cards = [
-        {"tmdb_id": x["tmdb_id"], "title": x["title"], "poster_url": x["poster_url"]}
+        {"tmdb_id": x["tmdb_id"], "title": x["title"], "poster_url": get_poster_url(x["poster_url"], x["title"], tmdb_id=x["tmdb_id"])}
         for x in final_list[:limit]
     ]
     return suggestions, cards
@@ -588,10 +663,8 @@ elif st.session_state.view == "details":
 
     with left:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        if data.get("poster_url"):
-            st.image(data["poster_url"], use_column_width=True)
-        else:
-            st.write("🖼️ No poster")
+        poster_img = get_poster_url(data.get("poster_url") or data.get("poster_path"), data.get("title", "Movie"), tmdb_id=data.get("tmdb_id"))
+        render_poster_image(poster_img, data.get("title", "Movie"))
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
@@ -611,8 +684,9 @@ elif st.session_state.view == "details":
         st.markdown("</div>", unsafe_allow_html=True)
 
     if data.get("backdrop_url"):
+        backdrop_img = get_poster_url(data["backdrop_url"], data.get("title", "Movie"))
         st.markdown("#### Backdrop")
-        st.image(data["backdrop_url"], use_column_width=True)
+        render_poster_image(backdrop_img, data.get("title", "Movie"))
 
     st.divider()
     st.markdown("### ✅ Recommendations")
