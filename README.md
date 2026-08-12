@@ -6,7 +6,7 @@ A full-stack movie recommendation web app built with **FastAPI** (backend) and *
 
 ## 🚀 Live Demo
 
-- **Frontend (Streamlit):** *(deploy URL here)*
+- **Frontend (Streamlit):** *[https://movie-recommendation-system-1207.streamlit.app/](https://movie-recommendation-system-1207.streamlit.app/)
 - **Backend API (FastAPI):** [https://movie-recommendation-system-6puz.onrender.com](https://movie-recommendation-system-6puz.onrender.com)
 
 ---
