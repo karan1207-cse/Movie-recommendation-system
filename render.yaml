@@ -2,5 +2,5 @@ services:
   - type: web
     name: movie-recommendation-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements-backend.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
