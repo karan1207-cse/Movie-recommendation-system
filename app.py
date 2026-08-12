@@ -49,8 +49,9 @@ def load_local_engine():
     csv_path = os.path.join(BASE_DIR, "movies_metadata.csv")
     df = pd.read_csv(csv_path, low_memory=False)
     
-    df_clean = df[["id", "title", "overview", "poster_path", "release_date", "vote_average"]].dropna(subset=["title", "overview"]).copy()
+    df_clean = df[["id", "title", "overview", "poster_path", "release_date", "vote_average", "vote_count"]].dropna(subset=["title", "overview"]).copy()
     df_clean["title_str"] = df_clean["title"].astype(str)
+    df_clean["vote_count_num"] = pd.to_numeric(df_clean["vote_count"], errors="coerce").fillna(0)
     
     tfidf_obj = TfidfVectorizer(stop_words="english")
     tfidf_matrix = tfidf_obj.fit_transform(df_clean["overview"])
@@ -63,9 +64,11 @@ def load_local_engine():
 
 def tmdb_direct_get(endpoint: str, params: dict | None = None):
     p = dict(params or {})
-    p["api_key"] = get_tmdb_key()
+    key = get_tmdb_key()
+    p["api_key"] = key
+    headers = {"Authorization": f"Bearer {key}"}
     try:
-        r = requests.get(f"{TMDB_BASE}{endpoint}", params=p, timeout=8)
+        r = requests.get(f"{TMDB_BASE}{endpoint}", params=p, headers=headers, timeout=12)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -86,22 +89,24 @@ def direct_home(category: str = "popular", limit: int = 24):
                 "release_date": m.get("release_date"),
                 "vote_average": m.get("vote_average"),
             })
-        return cards
+        if cards:
+            return cards
     
-    # Offline CSV fallback
+    # Offline CSV fallback sorted by popularity
     df_clean, _, _ = load_local_engine()
-    sample = df_clean.sample(min(limit, len(df_clean)))
+    top_movies = df_clean.sort_values(by="vote_count_num", ascending=False).head(limit)
     cards = []
-    for _, row in sample.iterrows():
+    for _, row in top_movies.iterrows():
         try:
             tmdb_id = int(row["id"])
         except Exception:
             tmdb_id = 0
+        p_path = str(row["poster_path"]).strip() if pd.notna(row["poster_path"]) else ""
         cards.append({
             "tmdb_id": tmdb_id,
             "title": str(row["title"]),
-            "poster_url": f"{TMDB_IMG}{row['poster_path']}" if pd.notna(row["poster_path"]) else None,
-            "release_date": str(row["release_date"]),
+            "poster_url": f"{TMDB_IMG}{p_path}" if p_path and p_path.startswith("/") else None,
+            "release_date": str(row["release_date"]) if pd.notna(row["release_date"]) else "",
             "vote_average": float(row["vote_average"]) if pd.notna(row["vote_average"]) else None,
         })
     return cards
@@ -346,12 +351,27 @@ def poster_grid(cards, cols=6, key_prefix="grid"):
             tmdb_id = m.get("tmdb_id")
             title = m.get("title", "Untitled")
             poster = m.get("poster_url")
+            
+            is_valid_poster = (
+                poster 
+                and isinstance(poster, str) 
+                and poster.startswith("http") 
+                and not poster.endswith("None") 
+                and not poster.endswith("nan")
+            )
 
             with colset[c]:
-                if poster:
+                if is_valid_poster:
                     st.image(poster, use_column_width=True)
                 else:
-                    st.write("🖼️ No poster")
+                    st.markdown(
+                        f"""
+                        <div style="height:210px; background:#1e293b; border-radius:10px; display:flex; align-items:center; justify-content:center; text-align:center; padding:12px; color:#f8fafc; font-weight:600; font-size:0.85rem; margin-bottom:8px; border:1px solid #334155;">
+                            🎬<br><br>{title}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
                 if st.button("Open", key=f"{key_prefix}_{r}_{c}_{idx}_{tmdb_id}"):
                     if tmdb_id:
