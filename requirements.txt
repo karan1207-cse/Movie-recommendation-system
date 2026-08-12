@@ -1,11 +1,10 @@
 # ─────────────────────────────────────────────────────────
 # Streamlit Cloud requirements (app.py — frontend only)
-# Backend (main.py) runs separately on Render.
+# The backend (main.py) runs on Render, not Streamlit Cloud.
+#
+# app.py only imports: requests, streamlit
+# All ML packages (numpy, pandas, scikit-learn) are used
+# only by main.py on the Render backend.
 # ─────────────────────────────────────────────────────────
 streamlit==1.38.0
 requests==2.32.3
-numpy==1.26.4
-pandas==2.2.3
-scikit-learn==1.5.2
-scipy==1.13.1
-pillow==10.4.0
