@@ -334,6 +334,25 @@ def load_pickles():
 # =========================
 # ROUTES
 # =========================
+@app.get("/")
+def root():
+    return {
+        "name": "Movie Recommender API",
+        "version": "3.0",
+        "status": "running",
+        "docs": "/docs",
+        "endpoints": [
+            "/health",
+            "/home",
+            "/tmdb/search",
+            "/movie/id/{tmdb_id}",
+            "/movie/search",
+            "/recommend/genre",
+            "/recommend/tfidf",
+        ],
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
