@@ -193,14 +193,6 @@ requests==2.34.2
 
 ---
 
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE).
-
----
-
 ## 👨‍💻 Author
 
 **Karan** — [@karan1207-cse](https://github.com/karan1207-cse)
-
-> ⭐ If you found this helpful, please give it a star!
