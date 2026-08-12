@@ -12,7 +12,7 @@ import streamlit as st
 API_BASE = "https://movie-recommendation-system-6puz.onrender.com"
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
-DEFAULT_TMDB_KEY = "c93c1394ade63533cd412d87433eda9"
+DEFAULT_TMDB_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjOTNjMTM5NDVhZGU2MzUzM2NkNDEyZDg3NDMzZWRhOSIsIm5iZiI6MTc3OTM3MTY5MC42NDcsInN1YiI6IjZhMGYwZWFhYjcwMTBiMzhjZjM4ZGIwNyIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.3MKiMX5_BV4-Fdm93FNWaHkxHqJKYHlIfaiucPOPPbA"
 
 
 def get_tmdb_key():
@@ -39,34 +39,36 @@ def get_placeholder_poster(title: str) -> str:
     return f"data:image/svg+xml;utf8,{urllib.parse.quote(svg)}"
 
 
-def get_poster_url(poster_path: str | None, title: str = "Movie", tmdb_id: int | None = None) -> str:
+def get_poster_url(poster_path: str | None = None, title: str = "Movie", tmdb_id: int | None = None) -> str:
     if tmdb_id and isinstance(tmdb_id, (int, float, str)):
         try:
             tid = int(tmdb_id)
             if tid > 0:
                 live_p = fetch_live_poster_path(tid)
                 if live_p:
-                    if live_p.startswith("/"):
-                        return f"https://image.tmdb.org/t/p/w500{live_p}"
-                    return f"https://image.tmdb.org/t/p/w500/{live_p}"
+                    live_s = str(live_p).strip()
+                    if live_s.startswith("http://") or live_s.startswith("https://"):
+                        return live_s
+                    if not live_s.startswith("/"):
+                        live_s = "/" + live_s
+                    return f"https://image.tmdb.org/t/p/w500{live_s}"
         except Exception:
             pass
 
-    if not poster_path:
-        return get_placeholder_poster(title)
+    if poster_path:
+        s = str(poster_path).strip()
+        if s.lower() not in ("none", "nan", "null", ""):
+            if s.startswith("data:image"):
+                return s
+            if s.startswith("http://") or s.startswith("https://"):
+                if not (s.endswith("None") or s.endswith("nan") or s.endswith("null")):
+                    return s
+            else:
+                if not s.startswith("/"):
+                    s = "/" + s
+                return f"https://image.tmdb.org/t/p/w500{s}"
 
-    s = str(poster_path).strip()
-    if s.lower() in ("none", "nan", "null", ""):
-        return get_placeholder_poster(title)
-    if s.startswith("data:image"):
-        return s
-    if s.startswith("http://") or s.startswith("https://"):
-        if s.endswith("None") or s.endswith("nan") or s.endswith("null"):
-            return get_placeholder_poster(title)
-        return s
-    if s.startswith("/"):
-        return f"https://image.tmdb.org/t/p/w500{s}"
-    return f"https://image.tmdb.org/t/p/w500/{s}"
+    return get_placeholder_poster(title)
 
 
 def render_poster_image(poster_url: str, title: str = "Movie"):
@@ -120,10 +122,14 @@ def load_local_engine():
 def tmdb_direct_get(endpoint: str, params: dict | None = None):
     p = dict(params or {})
     key = get_tmdb_key()
-    p["api_key"] = key
-    headers = {"Authorization": f"Bearer {key}"}
+    headers = {}
+    if key:
+        if str(key).startswith("eyJ"):
+            headers["Authorization"] = f"Bearer {key}"
+        else:
+            p["api_key"] = key
     try:
-        r = requests.get(f"{TMDB_BASE}{endpoint}", params=p, headers=headers, timeout=12)
+        r = requests.get(f"{TMDB_BASE}{endpoint}", params=p, headers=headers if headers else None, timeout=12)
         if r.status_code == 200:
             return r.json()
     except Exception:
